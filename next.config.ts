@@ -1,7 +1,10 @@
 // next.config.ts
-import { NextConfig } from 'next'
-
-const nextConfig: NextConfig = {
+const nextConfig = {
+  // Ensure images from Mapbox are allowed
+  images: {
+    domains: ['api.mapbox.com'],
+  },
+  // Add headers for Mapbox
   async headers() {
     return [
       {
@@ -11,7 +14,7 @@ const nextConfig: NextConfig = {
             key: 'Content-Security-Policy',
             value: [
               "default-src 'self'",
-              "script-src 'self' 'unsafe-eval' 'unsafe-inline' api.mapbox.com",
+              "script-src 'self' 'unsafe-eval' api.mapbox.com",
               "style-src 'self' 'unsafe-inline' api.mapbox.com",
               "img-src 'self' data: blob: api.mapbox.com",
               "connect-src 'self' api.mapbox.com events.mapbox.com",
@@ -20,17 +23,8 @@ const nextConfig: NextConfig = {
           }
         ]
       }
-    ]
-  },
-  webpack: (config) => {
-    // This is important for Mapbox GL JS
-    config.resolve.fallback = {
-      ...config.resolve.fallback,
-      fs: false,
-      path: false
-    }
-    return config
+    ];
   }
-}
+};
 
-export default nextConfig
+export default nextConfig;

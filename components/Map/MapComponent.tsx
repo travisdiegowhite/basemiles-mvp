@@ -2,6 +2,8 @@
 // Purpose: Main map component for route planning and visualization
 // This component handles map display, route creation, distance calculations,
 // and user interactions for creating walking or cycling routes.
+// This works TW
+
 
 import { useEffect, useRef, useState, FC, ReactElement } from 'react';
 import 'mapbox-gl/dist/mapbox-gl.css';

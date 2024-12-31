@@ -1,22 +1,24 @@
-// components/Map/MapComponent.tsx
+// File: components/Map/MapComponent.tsx
+// Purpose: Main map component for route planning and visualization
+// This component handles map display, route creation, distance calculations,
+// and user interactions for creating walking or cycling routes.
 
 import { useEffect, useRef, useState, FC, ReactElement } from 'react';
 import 'mapbox-gl/dist/mapbox-gl.css';
 
-// Define our core types for map functionality
-// We use these instead of importing directly from mapbox-gl to avoid type-only import issues
-type Map = any;  // In production, we'd define this more precisely
+// Core type definitions for map functionality
+type Map = any;  // In production, we'd want to properly type this from mapbox-gl
 type Marker = any;
 type LngLat = { lng: number; lat: number };
 type MapMouseEvent = { lngLat: LngLat };
 
-// Interface for each point in our route
+// Define the structure for each point in our route
 interface RoutePoint {
   id: string;  // Unique identifier for each point
-  coordinates: [number, number];  // [longitude, latitude] - Mapbox uses this order
+  coordinates: [number, number];  // [longitude, latitude] in Mapbox format
 }
 
-// Interface for the route details we get back from Mapbox Directions API
+// Define the structure for route details returned by Mapbox Directions API
 interface RouteDetails {
   distance: number;  // Distance in meters
   duration: number;  // Duration in seconds
@@ -26,7 +28,7 @@ interface RouteDetails {
   };
 }
 
-// Props interface for our component
+// Define the props our component accepts
 interface Props {
   onRouteSave?: (route: {
     points: RoutePoint[];
@@ -34,7 +36,7 @@ interface Props {
   }) => void;
 }
 
-// We'll store mapboxgl at module level after dynamic import
+// Module-level variable for Mapbox GL JS instance
 let mapboxgl: any;
 
 const MapComponent: FC<Props> = ({ onRouteSave }): ReactElement => {
@@ -45,64 +47,79 @@ const MapComponent: FC<Props> = ({ onRouteSave }): ReactElement => {
   const [routeType, setRouteType] = useState<'walking' | 'cycling'>('walking');
   const [mapLoaded, setMapLoaded] = useState(false);
 
-  // Refs for persistent values that don't trigger re-renders
+  // Refs for managing persistent values
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<Map | null>(null);
   const markersRef = useRef<Marker[]>([]);
   const routeRef = useRef<any>(null);
 
-  // Initialize the map when the component mounts
+  // Initialize map with retry logic for better reliability
   const initializeMap = async () => {
     try {
-      // Dynamically import mapbox-gl to avoid SSR issues
+      // Dynamically import Mapbox GL JS to avoid SSR issues
       const mapboxModule = await import('mapbox-gl');
       mapboxgl = mapboxModule.default;
       
       if (!mapContainer.current || map.current) return;
 
-      // Create new map instance
-      map.current = new mapboxgl.Map({
-        container: mapContainer.current,
-        style: 'mapbox://styles/mapbox/streets-v12',
-        center: [-95, 40],  // Default center (USA)
-        zoom: 4,
-        accessToken: process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN
-      });
+      let retryCount = 0;
+      const maxRetries = 3;
 
-      // Add navigation controls (zoom in/out, rotation)
-      map.current.addControl(new mapboxgl.NavigationControl());
+      const createMap = async () => {
+        try {
+          map.current = new mapboxgl.Map({
+            container: mapContainer.current,
+            style: 'mapbox://styles/mapbox/streets-v12',
+            center: [-95, 40],  // Default center (USA)
+            zoom: 4,
+            accessToken: process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN,
+            failIfMajorPerformanceCaveat: false,
+            refreshExpiredTiles: false
+          });
 
-      // Set up map event handlers after initial load
-      map.current.on('load', () => {
-        setMapLoaded(true);
-        setupMapLayers();
-        getUserLocation();
-      });
+          // Add error handling for map load failures
+          map.current.on('error', (e: Error) => {
+            console.error('Map error:', e);
+            if (map.current && !map.current.loaded() && retryCount < maxRetries) {
+              retryCount++;
+              console.log(`Retrying map initialization (${retryCount}/${maxRetries})...`);
+              map.current.remove();
+              createMap();
+            }
+          });
 
-      // Add click handler for adding new points
-      map.current.on('click', handleMapClick);
+          // Add navigation controls and initialize map features
+          map.current.addControl(new mapboxgl.NavigationControl());
+
+          map.current.on('load', () => {
+            setMapLoaded(true);
+            setupMapLayers();
+            getUserLocation();
+          });
+
+          // Add click handler for route point creation
+          map.current.on('click', handleMapClick);
+        } catch (error) {
+          console.error('Error in createMap:', error);
+          if (retryCount < maxRetries) {
+            retryCount++;
+            console.log(`Retrying map initialization (${retryCount}/${maxRetries})...`);
+            setTimeout(createMap, 1000 * retryCount); // Exponential backoff
+          }
+        }
+      };
+
+      await createMap();
     } catch (error) {
-      console.error('Error initializing map:', error);
+      console.error('Error in initializeMap:', error);
     }
   };
 
-  // Effect for map initialization and cleanup
-  useEffect(() => {
-    initializeMap();
-
-    // Cleanup function to remove map when component unmounts
-    return () => {
-      if (map.current) {
-        map.current.remove();
-        map.current = null;
-      }
-    };
-  }, []);
-
-  // Set up the route layer for displaying the path
+  // Setup map layers for route visualization
   const setupMapLayers = () => {
     if (!map.current) return;
 
+    // Add source for route line
     map.current.addSource('route', {
       type: 'geojson',
       data: {
@@ -115,7 +132,7 @@ const MapComponent: FC<Props> = ({ onRouteSave }): ReactElement => {
       }
     });
 
-    // Add the route line layer with styling
+    // Add visual layer for route line
     map.current.addLayer({
       id: 'route',
       type: 'line',
@@ -150,7 +167,7 @@ const MapComponent: FC<Props> = ({ onRouteSave }): ReactElement => {
     );
   };
 
-  // Handle clicks on the map to add new points
+  // Handle map clicks to add new route points
   const handleMapClick = (e: MapMouseEvent) => {
     const newPoint: RoutePoint = {
       id: crypto.randomUUID(),
@@ -163,15 +180,16 @@ const MapComponent: FC<Props> = ({ onRouteSave }): ReactElement => {
   useEffect(() => {
     if (!map.current) return;
 
-    // Clear existing markers
+    // Remove existing markers
     markersRef.current.forEach(marker => marker.remove());
     markersRef.current = [];
 
     // Add new markers for each point
     points.forEach((point, index) => {
-      // Create marker element with dynamic styling
       const el = document.createElement('div');
       el.className = 'w-3 h-3 rounded-full border-2 border-white shadow';
+      
+      // Color coding for start, end, and waypoints
       el.style.backgroundColor = 
         index === 0 ? '#22c55e' : // Start point (green)
         index === points.length - 1 ? '#ef4444' : // End point (red)
@@ -185,7 +203,7 @@ const MapComponent: FC<Props> = ({ onRouteSave }): ReactElement => {
         .setLngLat(point.coordinates)
         .addTo(map.current!);
 
-      // Update point coordinates when marker is dragged
+      // Update point position when marker is dragged
       marker.on('dragend', () => {
         const newLngLat = marker.getLngLat();
         setPoints(prev => prev.map((p, i) => 
@@ -210,7 +228,7 @@ const MapComponent: FC<Props> = ({ onRouteSave }): ReactElement => {
     return `${(meters / 1609.344).toFixed(2)} mi`;
   };
 
-  // Fetch route from Mapbox Directions API
+  // Fetch route data from Mapbox Directions API
   const fetchRoute = async () => {
     if (points.length < 2) return;
 
@@ -228,6 +246,7 @@ const MapComponent: FC<Props> = ({ onRouteSave }): ReactElement => {
 
       setRouteDetails(route);
       
+      // Update route visualization
       if (routeRef.current) {
         routeRef.current.setData({
           type: 'Feature',
@@ -260,9 +279,36 @@ const MapComponent: FC<Props> = ({ onRouteSave }): ReactElement => {
   const toggleUnit = () => setUnit(prev => prev === 'km' ? 'mi' : 'km');
 
   // Toggle between walking and cycling routes
-  const toggleRouteType = () => setRouteType(prev => prev === 'walking' ? 'cycling' : 'walking');
+  const toggleRouteType = () => {
+    setRouteType(prev => prev === 'walking' ? 'cycling' : 'walking');
+    if (points.length >= 2) {
+      fetchRoute(); // Refetch route with new type
+    }
+  };
 
-  // Render the component
+  // Initialize map and handle cleanup
+  useEffect(() => {
+    initializeMap();
+
+    return () => {
+      if (map.current) {
+        // Clean up event listeners
+        map.current.off('load');
+        map.current.off('error');
+        map.current.off('click', handleMapClick);
+        
+        // Remove markers
+        markersRef.current.forEach(marker => marker.remove());
+        markersRef.current = [];
+        
+        // Remove map
+        map.current.remove();
+        map.current = null;
+      }
+    };
+  }, []);
+
+  // Render component
   return (
     <div className="space-y-4">
       <div className="flex justify-between items-center p-4 bg-white shadow-sm">

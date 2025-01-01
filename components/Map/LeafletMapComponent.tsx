@@ -3,9 +3,10 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import type { Coordinate, RouteData, RouteStep } from '../../types/map';
-import { formatDistance, formatDuration, cleanInstruction } from '../../utils/routeUtils';
-// 
+import type { Coordinate, RouteData, RouteStep, RoutePreferences } from '../../types/map';
+import { formatDistance, formatDuration, cleanInstruction, getRouteParams } from '../../utils/routeUtils';
+import { RoutePreferencesPanel } from './RoutePreferences';
+
 const initializeLeafletIcons = () => {
   if ((L.Icon.Default.prototype as any)._getIconUrl) {
     delete (L.Icon.Default.prototype as any)._getIconUrl;
@@ -20,24 +21,37 @@ const initializeLeafletIcons = () => {
 
 const DEFAULT_CENTER: Coordinate = [37.7749, -122.4194];
 const DEFAULT_ZOOM = 13;
+const DEFAULT_PREFERENCES: RoutePreferences = {
+  hills: 'none',
+  type: 'balanced',
+  surface: 'any'
+};
 
 const LeafletMapComponent = () => {
+  // State
   const [waypoints, setWaypoints] = useState<Coordinate[]>([]);
   const [routeData, setRouteData] = useState<RouteData | null>(null);
+  const [alternatives, setAlternatives] = useState<RouteData[]>([]);
+  const [selectedRouteIndex, setSelectedRouteIndex] = useState<number>(0);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [preferences, setPreferences] = useState<RoutePreferences>(DEFAULT_PREFERENCES);
   const [activeStep, setActiveStep] = useState<RouteStep | null>(null);
 
+  // Refs
+  const mapContainer = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
   const routeLayerRef = useRef<L.Polyline | null>(null);
+  const alternativeLayersRef = useRef<L.Polyline[]>([]);
   const markersRef = useRef<L.Marker[]>([]);
   const activeStepMarkerRef = useRef<L.Marker | null>(null);
 
+  // Initialize map
   useEffect(() => {
     initializeLeafletIcons();
 
-    if (!mapRef.current) {
-      const map = L.map('map').setView(DEFAULT_CENTER, DEFAULT_ZOOM);
+    if (!mapRef.current && mapContainer.current) {
+      const map = L.map(mapContainer.current).setView(DEFAULT_CENTER, DEFAULT_ZOOM);
       
       L.tileLayer(
         `https://api.mapbox.com/styles/v1/mapbox/streets-v11/tiles/{z}/{x}/{y}?access_token=${process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN}`,
@@ -61,6 +75,32 @@ const LeafletMapComponent = () => {
     };
   }, []);
 
+  // Clear all map layers
+  const clearMapLayers = useCallback(() => {
+    if (!mapRef.current) return;
+
+    markersRef.current.forEach(marker => {
+      marker.remove();
+    });
+    markersRef.current = [];
+
+    if (routeLayerRef.current) {
+      routeLayerRef.current.remove();
+      routeLayerRef.current = null;
+    }
+
+    alternativeLayersRef.current.forEach(layer => {
+      layer.remove();
+    });
+    alternativeLayersRef.current = [];
+
+    if (activeStepMarkerRef.current) {
+      activeStepMarkerRef.current.remove();
+      activeStepMarkerRef.current = null;
+    }
+  }, []);
+
+  // Handle map clicks
   const handleMapClick = useCallback((e: L.LeafletMouseEvent) => {
     if (!mapRef.current) return;
 
@@ -79,6 +119,7 @@ const LeafletMapComponent = () => {
     });
   }, []);
 
+  // Fetch route data
   const fetchRoute = async (points: Coordinate[]) => {
     if (points.length < 2) return;
     
@@ -90,114 +131,130 @@ const LeafletMapComponent = () => {
         .map(([lat, lng]) => `${lng},${lat}`)
         .join(';');
 
-      const params = new URLSearchParams({
-        geometries: 'geojson',
-        access_token: process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN || '',
-        steps: 'true',
-        overview: 'full',
-        annotations: 'duration,distance'
-      });
+      const params = getRouteParams(preferences);
+      const url = `https://api.mapbox.com/directions/v5/mapbox/cycling/${coordinates}`;
 
-      const response = await fetch(
-        `https://api.mapbox.com/directions/v5/mapbox/cycling/${coordinates}?${params}`
-      );
-
-      if (!response.ok) throw new Error('Failed to fetch route');
-
+      const response = await fetch(`${url}?${params.toString()}`);
       const data = await response.json();
-      if (!data.routes?.[0]) throw new Error('No route found');
 
-      const routeData = data.routes[0] as RouteData;
-      setRouteData(routeData);
-      drawRoute(routeData.geometry.coordinates);
+      if (!response.ok) {
+        throw new Error(data.message || 'Failed to fetch route');
+      }
+
+      if (!data.routes?.length) {
+        throw new Error('No route found');
+      }
+
+      const mainRoute = data.routes[0] as RouteData;
+      const alternativeRoutes = data.routes.slice(1) as RouteData[];
+
+      setRouteData(mainRoute);
+      setAlternatives(alternativeRoutes);
+      setSelectedRouteIndex(0);
+
+      drawRoutes(mainRoute, alternativeRoutes);
 
     } catch (err) {
-      console.error('Error fetching route:', err);
+      console.error('Error details:', err);
       setError(err instanceof Error ? err.message : 'Error fetching route');
     } finally {
       setIsLoading(false);
     }
   };
 
-  const drawRoute = useCallback((coordinates: [number, number][]) => {
+  // Draw routes on the map
+  const drawRoutes = useCallback((mainRoute: RouteData, alternatives: RouteData[]) => {
     if (!mapRef.current) return;
 
-    if (routeLayerRef.current) {
-      mapRef.current.removeLayer(routeLayerRef.current);
-      routeLayerRef.current = null;
-    }
+    clearMapLayers();
 
-    const leafletCoords = coordinates.map(([lng, lat]) => [lat, lng] as [number, number]);
+    // Draw alternative routes
+    alternatives.forEach((route, index) => {
+      const coords = route.geometry.coordinates.map(
+        ([lng, lat]) => [lat, lng] as [number, number]
+      );
 
-    routeLayerRef.current = L.polyline(leafletCoords, {
+      const alternativeLayer = L.polyline(coords, {
+        color: '#94a3b8',
+        weight: 4,
+        opacity: 0.5,
+        dashArray: '5, 10'
+      }).addTo(mapRef.current!);
+
+      alternativeLayersRef.current.push(alternativeLayer);
+    });
+
+    // Draw main route
+    const mainCoords = mainRoute.geometry.coordinates.map(
+      ([lng, lat]) => [lat, lng] as [number, number]
+    );
+
+    routeLayerRef.current = L.polyline(mainCoords, {
       color: '#3b82f6',
       weight: 5,
       opacity: 0.8
     }).addTo(mapRef.current);
 
-    const bounds = L.latLngBounds(leafletCoords);
+    // Fit bounds to show all routes
+    const allCoords = [mainCoords, ...alternatives.map(r => 
+      r.geometry.coordinates.map(([lng, lat]) => [lat, lng] as [number, number])
+    )].flat();
+
+    const bounds = L.latLngBounds(allCoords);
     mapRef.current.fitBounds(bounds, {
       padding: [50, 50],
       maxZoom: 16
     });
-  }, []);
+  }, [clearMapLayers]);
 
-  const highlightStep = useCallback((step: RouteStep) => {
+  // Handle route selection
+  const selectRoute = useCallback((index: number) => {
     if (!mapRef.current) return;
 
-    if (activeStepMarkerRef.current) {
-      mapRef.current.removeLayer(activeStepMarkerRef.current);
-      activeStepMarkerRef.current = null;
-    }
+    const selectedRoute = index === 0 ? routeData : alternatives[index - 1];
+    if (!selectedRoute) return;
 
-    const [lng, lat] = step.maneuver.location;
-    const icon = L.divIcon({
-      className: 'step-marker',
-      html: '<div class="w-4 h-4 bg-yellow-400 rounded-full border-2 border-white shadow-lg"></div>'
-    });
-
-    activeStepMarkerRef.current = L.marker([lat, lng], { icon })
-      .addTo(mapRef.current)
-      .bindPopup(cleanInstruction(step.maneuver.instruction))
-      .openPopup();
-
-    mapRef.current.setView([lat, lng], 16);
-    setActiveStep(step);
-  }, []);
-
-  const resetMap = useCallback(() => {
-    if (!mapRef.current) return;
-
-    markersRef.current.forEach(marker => {
-      if (mapRef.current) {
-        mapRef.current.removeLayer(marker);
-      }
-    });
-    markersRef.current = [];
+    setSelectedRouteIndex(index);
+    setRouteData(selectedRoute);
 
     if (routeLayerRef.current) {
-      mapRef.current.removeLayer(routeLayerRef.current);
-      routeLayerRef.current = null;
+      routeLayerRef.current.setStyle({ opacity: 0.8 });
     }
 
-    if (activeStepMarkerRef.current) {
-      mapRef.current.removeLayer(activeStepMarkerRef.current);
-      activeStepMarkerRef.current = null;
-    }
+    alternativeLayersRef.current.forEach((layer, i) => {
+      layer.setStyle({
+        opacity: i === index - 1 ? 0.8 : 0.5
+      });
+    });
+  }, [routeData, alternatives]);
 
+  // Reset map
+  const resetMap = useCallback(() => {
+    clearMapLayers();
     setWaypoints([]);
     setRouteData(null);
+    setAlternatives([]);
+    setSelectedRouteIndex(0);
     setActiveStep(null);
     setError(null);
 
-    mapRef.current.setView(DEFAULT_CENTER, DEFAULT_ZOOM);
-  }, []);
+    if (mapRef.current) {
+      mapRef.current.setView(DEFAULT_CENTER, DEFAULT_ZOOM);
+    }
+  }, [clearMapLayers]);
+
+  // Update route when preferences change
+  useEffect(() => {
+    if (waypoints.length >= 2) {
+      fetchRoute(waypoints);
+    }
+  }, [preferences, waypoints]);
 
   return (
     <div className="flex h-screen bg-gray-100">
       <div className="flex-1 p-4">
         <div className="bg-white rounded-lg shadow-lg overflow-hidden h-full relative">
-          <div id="map" className="h-full w-full" />
+          <div ref={mapContainer} className="h-full w-full" />
           
           {isLoading && (
             <div className="absolute top-4 right-4 bg-white px-4 py-2 rounded shadow">
@@ -228,52 +285,67 @@ const LeafletMapComponent = () => {
             </button>
           </div>
 
-          {routeData && (
-            <>
-              <div className="p-4 bg-gray-50 rounded-lg">
-                <h4 className="font-medium mb-3">Route Summary</h4>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <p className="text-sm text-gray-500">Distance</p>
-                    <p className="text-lg font-medium">
-                      {formatDistance(routeData.distance)}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-sm text-gray-500">Duration</p>
-                    <p className="text-lg font-medium">
-                      {formatDuration(routeData.duration)}
-                    </p>
-                  </div>
-                </div>
-              </div>
+          <RoutePreferencesPanel
+            preferences={preferences}
+            onChange={setPreferences}
+          />
 
-              <div className="p-4 bg-gray-50 rounded-lg">
-                <h4 className="font-medium mb-3">Turn-by-turn Directions</h4>
-                <div className="space-y-2">
-                  {routeData.legs.flatMap((leg, legIndex) =>
-                    leg.steps.map((step, stepIndex) => (
-                      <button
-                        key={`${legIndex}-${stepIndex}`}
-                        onClick={() => highlightStep(step)}
-                        className={`w-full text-left p-3 rounded-lg transition-colors ${
-                          activeStep === step
-                            ? 'bg-blue-50 border border-blue-200'
-                            : 'hover:bg-gray-100'
-                        }`}
-                      >
-                        <p className="text-sm">
-                          {cleanInstruction(step.maneuver.instruction)}
-                        </p>
-                        <p className="text-xs text-gray-500 mt-1">
-                          {formatDistance(step.distance)} • {formatDuration(step.duration)}
-                        </p>
-                      </button>
-                    ))
-                  )}
+          {routeData && (
+            <div className="p-4 bg-gray-50 rounded-lg">
+              <h4 className="font-medium mb-3">Route Summary</h4>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <p className="text-sm text-gray-500">Distance</p>
+                  <p className="text-lg font-medium">
+                    {formatDistance(routeData.distance)}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-sm text-gray-500">Duration</p>
+                  <p className="text-lg font-medium">
+                    {formatDuration(routeData.duration)}
+                  </p>
                 </div>
               </div>
-            </>
+            </div>
+          )}
+
+          {alternatives.length > 0 && (
+            <div className="p-4 bg-gray-50 rounded-lg">
+              <h4 className="font-medium mb-3">Alternative Routes</h4>
+              <div className="space-y-2">
+                <button
+                  onClick={() => selectRoute(0)}
+                  className={`w-full text-left p-3 rounded-lg transition-colors ${
+                    selectedRouteIndex === 0
+                      ? 'bg-blue-50 border border-blue-200'
+                      : 'hover:bg-gray-100'
+                  }`}
+                >
+                  <p className="font-medium">Main Route</p>
+                  <p className="text-sm text-gray-600">
+                    {formatDistance(routeData?.distance || 0)} • {formatDuration(routeData?.duration || 0)}
+                  </p>
+                </button>
+
+                {alternatives.map((route, index) => (
+                  <button
+                    key={index}
+                    onClick={() => selectRoute(index + 1)}
+                    className={`w-full text-left p-3 rounded-lg transition-colors ${
+                      selectedRouteIndex === index + 1
+                        ? 'bg-blue-50 border border-blue-200'
+                        : 'hover:bg-gray-100'
+                    }`}
+                  >
+                    <p className="font-medium">Alternative {index + 1}</p>
+                    <p className="text-sm text-gray-600">
+                      {formatDistance(route.distance)} • {formatDuration(route.duration)}
+                    </p>
+                  </button>
+                ))}
+              </div>
+            </div>
           )}
         </div>
       </div>

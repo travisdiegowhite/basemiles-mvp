@@ -3,9 +3,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-
-type Coordinate = [number, number];
-
+import type { Coordinate, RouteData, RouteStep } from '../../types/map';
+import { formatDistance, formatDuration, cleanInstruction } from '../../utils/routeUtils';
+// 
 const initializeLeafletIcons = () => {
   if ((L.Icon.Default.prototype as any)._getIconUrl) {
     delete (L.Icon.Default.prototype as any)._getIconUrl;
@@ -23,16 +23,17 @@ const DEFAULT_ZOOM = 13;
 
 const LeafletMapComponent = () => {
   const [waypoints, setWaypoints] = useState<Coordinate[]>([]);
+  const [routeData, setRouteData] = useState<RouteData | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [activeStep, setActiveStep] = useState<RouteStep | null>(null);
 
   const mapRef = useRef<L.Map | null>(null);
   const routeLayerRef = useRef<L.Polyline | null>(null);
   const markersRef = useRef<L.Marker[]>([]);
+  const activeStepMarkerRef = useRef<L.Marker | null>(null);
 
-  // Initialize map
   useEffect(() => {
-    console.log('Initializing map...');
     initializeLeafletIcons();
 
     if (!mapRef.current) {
@@ -50,7 +51,6 @@ const LeafletMapComponent = () => {
 
       map.on('click', handleMapClick);
       mapRef.current = map;
-      console.log('Map initialized successfully');
     }
 
     return () => {
@@ -61,74 +61,55 @@ const LeafletMapComponent = () => {
     };
   }, []);
 
-  // Handle map clicks
   const handleMapClick = useCallback((e: L.LeafletMouseEvent) => {
-    console.log('Map clicked:', e.latlng);
     if (!mapRef.current) return;
 
     const { lat, lng } = e.latlng;
     const newPoint: Coordinate = [lat, lng];
     
-    // Add marker
     const marker = L.marker([lat, lng]).addTo(mapRef.current);
     markersRef.current.push(marker);
 
     setWaypoints(prev => {
       const newWaypoints = [...prev, newPoint];
-      console.log('Updated waypoints:', newWaypoints);
-      
       if (newWaypoints.length >= 2) {
-        console.log('Two or more waypoints - fetching route...');
         fetchRoute(newWaypoints);
       }
-      
       return newWaypoints;
     });
   }, []);
 
   const fetchRoute = async (points: Coordinate[]) => {
-    console.log('Fetching route for points:', points);
     if (points.length < 2) return;
     
     setIsLoading(true);
     setError(null);
 
     try {
-      // Convert to Mapbox format (lng,lat)
       const coordinates = points
         .map(([lat, lng]) => `${lng},${lat}`)
         .join(';');
 
-      console.log('Coordinates string:', coordinates);
-
-      const url = `https://api.mapbox.com/directions/v5/mapbox/cycling/${coordinates}`;
       const params = new URLSearchParams({
         geometries: 'geojson',
         access_token: process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN || '',
         steps: 'true',
-        overview: 'full'
-      }).toString();
+        overview: 'full',
+        annotations: 'duration,distance'
+      });
 
-      console.log('Fetching from URL:', `${url}?${params}`);
+      const response = await fetch(
+        `https://api.mapbox.com/directions/v5/mapbox/cycling/${coordinates}?${params}`
+      );
 
-      const response = await fetch(`${url}?${params}`);
-      console.log('Response status:', response.status);
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error('API Error:', errorText);
-        throw new Error('Failed to fetch route');
-      }
+      if (!response.ok) throw new Error('Failed to fetch route');
 
       const data = await response.json();
-      console.log('Route data received:', data);
+      if (!data.routes?.[0]) throw new Error('No route found');
 
-      if (!data.routes?.[0]?.geometry?.coordinates) {
-        throw new Error('No route found');
-      }
-
-      // Draw the route
-      drawRoute(data.routes[0].geometry.coordinates);
+      const routeData = data.routes[0] as RouteData;
+      setRouteData(routeData);
+      drawRoute(routeData.geometry.coordinates);
 
     } catch (err) {
       console.error('Error fetching route:', err);
@@ -138,41 +119,55 @@ const LeafletMapComponent = () => {
     }
   };
 
-  const drawRoute = useCallback((coordinates: number[][]) => {
-    console.log('Drawing route with coordinates:', coordinates);
+  const drawRoute = useCallback((coordinates: [number, number][]) => {
     if (!mapRef.current) return;
 
-    // Clear existing route
     if (routeLayerRef.current) {
       mapRef.current.removeLayer(routeLayerRef.current);
       routeLayerRef.current = null;
     }
 
-    // Convert coordinates from [lng, lat] to [lat, lng]
-    const leafletCoords = coordinates.map(([lng, lat]) => [lat, lng] as Coordinate);
-    console.log('Converted coordinates:', leafletCoords);
+    const leafletCoords = coordinates.map(([lng, lat]) => [lat, lng] as [number, number]);
 
-    // Create new route layer
     routeLayerRef.current = L.polyline(leafletCoords, {
       color: '#3b82f6',
       weight: 5,
       opacity: 0.8
     }).addTo(mapRef.current);
 
-    // Fit bounds
-    mapRef.current.fitBounds(routeLayerRef.current.getBounds(), {
+    const bounds = L.latLngBounds(leafletCoords);
+    mapRef.current.fitBounds(bounds, {
       padding: [50, 50],
       maxZoom: 16
     });
+  }, []);
 
-    console.log('Route drawn successfully');
+  const highlightStep = useCallback((step: RouteStep) => {
+    if (!mapRef.current) return;
+
+    if (activeStepMarkerRef.current) {
+      mapRef.current.removeLayer(activeStepMarkerRef.current);
+      activeStepMarkerRef.current = null;
+    }
+
+    const [lng, lat] = step.maneuver.location;
+    const icon = L.divIcon({
+      className: 'step-marker',
+      html: '<div class="w-4 h-4 bg-yellow-400 rounded-full border-2 border-white shadow-lg"></div>'
+    });
+
+    activeStepMarkerRef.current = L.marker([lat, lng], { icon })
+      .addTo(mapRef.current)
+      .bindPopup(cleanInstruction(step.maneuver.instruction))
+      .openPopup();
+
+    mapRef.current.setView([lat, lng], 16);
+    setActiveStep(step);
   }, []);
 
   const resetMap = useCallback(() => {
-    console.log('Resetting map...');
     if (!mapRef.current) return;
 
-    // Clear markers
     markersRef.current.forEach(marker => {
       if (mapRef.current) {
         mapRef.current.removeLayer(marker);
@@ -180,19 +175,22 @@ const LeafletMapComponent = () => {
     });
     markersRef.current = [];
 
-    // Clear route
     if (routeLayerRef.current) {
       mapRef.current.removeLayer(routeLayerRef.current);
       routeLayerRef.current = null;
     }
 
-    // Reset state
+    if (activeStepMarkerRef.current) {
+      mapRef.current.removeLayer(activeStepMarkerRef.current);
+      activeStepMarkerRef.current = null;
+    }
+
     setWaypoints([]);
+    setRouteData(null);
+    setActiveStep(null);
     setError(null);
 
-    // Reset view
     mapRef.current.setView(DEFAULT_CENTER, DEFAULT_ZOOM);
-    console.log('Map reset complete');
   }, []);
 
   return (
@@ -215,7 +213,7 @@ const LeafletMapComponent = () => {
         </div>
       </div>
 
-      <div className="w-96 p-4 bg-white shadow-lg">
+      <div className="w-96 p-4 bg-white shadow-lg overflow-auto">
         <div className="space-y-4">
           <div className="p-4 bg-gray-50 rounded-lg">
             <h3 className="text-lg font-semibold mb-4">Route Planner</h3>
@@ -229,18 +227,53 @@ const LeafletMapComponent = () => {
               Reset Route
             </button>
           </div>
-          
-          {waypoints.length > 0 && (
-            <div className="p-4 bg-gray-50 rounded-lg">
-              <h4 className="font-medium mb-2">Waypoints</h4>
-              <ul className="space-y-2">
-                {waypoints.map((point, index) => (
-                  <li key={index} className="text-sm text-gray-600">
-                    Point {index + 1}: {point[0].toFixed(4)}, {point[1].toFixed(4)}
-                  </li>
-                ))}
-              </ul>
-            </div>
+
+          {routeData && (
+            <>
+              <div className="p-4 bg-gray-50 rounded-lg">
+                <h4 className="font-medium mb-3">Route Summary</h4>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <p className="text-sm text-gray-500">Distance</p>
+                    <p className="text-lg font-medium">
+                      {formatDistance(routeData.distance)}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-gray-500">Duration</p>
+                    <p className="text-lg font-medium">
+                      {formatDuration(routeData.duration)}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="p-4 bg-gray-50 rounded-lg">
+                <h4 className="font-medium mb-3">Turn-by-turn Directions</h4>
+                <div className="space-y-2">
+                  {routeData.legs.flatMap((leg, legIndex) =>
+                    leg.steps.map((step, stepIndex) => (
+                      <button
+                        key={`${legIndex}-${stepIndex}`}
+                        onClick={() => highlightStep(step)}
+                        className={`w-full text-left p-3 rounded-lg transition-colors ${
+                          activeStep === step
+                            ? 'bg-blue-50 border border-blue-200'
+                            : 'hover:bg-gray-100'
+                        }`}
+                      >
+                        <p className="text-sm">
+                          {cleanInstruction(step.maneuver.instruction)}
+                        </p>
+                        <p className="text-xs text-gray-500 mt-1">
+                          {formatDistance(step.distance)} • {formatDuration(step.duration)}
+                        </p>
+                      </button>
+                    ))
+                  )}
+                </div>
+              </div>
+            </>
           )}
         </div>
       </div>

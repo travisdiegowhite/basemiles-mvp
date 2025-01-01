@@ -1,12 +1,10 @@
-// File: /app/page.tsx
-import { RouteMap } from '@/components/Map/RouteMap';
+// app/page.tsx
+import { ClientMapWrapper } from '../components/Map/ClientMapWrapper';
 
 export default function Home() {
   return (
-    <div className="min-h-screen">
-      <div className="container mx-auto px-4 py-8">
-        <RouteMap />
-      </div>
-    </div>
+    <main className="min-h-screen bg-gray-100">
+      <ClientMapWrapper />
+    </main>
   );
 }

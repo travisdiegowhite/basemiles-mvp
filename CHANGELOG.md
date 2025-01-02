@@ -1,4 +1,30 @@
 # Changelog
+[0.3.3] - 2024-01-10
+## Added
+- Location search functionality with autocomplete
+- User geolocation on initial map load
+- Smooth map transitions using `flyTo` instead of `setView`
+- Search component in top-left corner
+- Better error handling for geolocation failures
+
+## Fixed
+- Map initialization error with container mounting
+- Leaflet positioning error (`_leaflet_pos undefined`)
+- Proper cleanup of map instance on unmount
+
+## Changed
+- Map initialization sequence to ensure container exists
+- Default center coordinates are set immediately on map creation
+- Geolocation is now requested after map is fully initialized
+- Transition animations added for smoother user experience
+  - Duration: 1.5 seconds
+  - Easing: 0.25 linearity
+
+## Technical Details
+- Added proper TypeScript types for search and location features
+- Organized utility functions into separate modules
+- Added debounced search to prevent API overload
+- Improved component dependency management in useEffect hooks
 
 [0.3.1] - 2024-01-10
 Added

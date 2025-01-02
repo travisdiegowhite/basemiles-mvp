@@ -85,3 +85,38 @@ export interface RouteComparison {
   speedDiff: string;
   mainFeatures: string[];
 }
+
+// Search related types
+export interface SearchResult {
+  id: string;
+  type: string;
+  place_name: string;
+  text: string;
+  center: Coordinate;
+  properties: {
+    address?: string;
+    category?: string;
+    maki?: string;
+  };
+  context?: Array<{
+    id: string;
+    text: string;
+    wikidata?: string;
+    short_code?: string;
+  }>;
+}
+
+export interface GeocodingResponse {
+  type: string;
+  features: SearchResult[];
+  attribution: string;
+  query: string[];
+}
+
+export interface LocationError {
+  code: number;
+  message: string;
+  PERMISSION_DENIED?: number;
+  POSITION_UNAVAILABLE?: number;
+  TIMEOUT?: number;
+}

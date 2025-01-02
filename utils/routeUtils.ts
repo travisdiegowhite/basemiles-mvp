@@ -1,5 +1,6 @@
 // utils/routeUtils.ts
-import { RoutePreferences } from '../types/map';
+
+import { RoutePreferences, Coordinate } from '../types/map';
 
 /**
  * Format distance in meters to human readable format
@@ -59,6 +60,16 @@ export const getRouteParams = (prefs: RoutePreferences): URLSearchParams => {
       break;
   }
 
+  // Add surface preferences
+  if (prefs.surface === 'paved') {
+    params.append('exclude', 'unpaved');
+  }
+
+  // Add hill preferences
+  if (prefs.hills === 'avoid') {
+    params.append('avoid_features', 'steep');
+  }
+
   return params;
 };
 
@@ -87,4 +98,56 @@ export const getRouteColor = (isSelected: boolean, isAlternative: boolean): stri
     return '#94a3b8';  // gray-400
   }
   return '#3b82f6';    // Default blue
+};
+
+/**
+ * Format coordinate for display in UI
+ */
+export const formatCoordinate = (coord: Coordinate): string => {
+  const [lat, lng] = coord;
+  return `${lat.toFixed(4)}°, ${lng.toFixed(4)}°`;
+};
+
+/**
+ * Generate search URL with appropriate parameters
+ */
+export const getSearchUrl = (query: string): string => {
+  const params = new URLSearchParams({
+    access_token: process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN || '',
+    types: 'place,address,poi',
+    limit: '5',
+    language: 'en'
+  });
+
+  return `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(query)}.json?${params.toString()}`;
+};
+
+/**
+ * Validate coordinates are within bounds
+ */
+export const isValidCoordinate = (coord: Coordinate): boolean => {
+  const [lat, lng] = coord;
+  return (
+    typeof lat === 'number' &&
+    typeof lng === 'number' &&
+    lat >= -90 && lat <= 90 &&
+    lng >= -180 && lng <= 180
+  );
+};
+
+/**
+ * Calculate bounding box for a set of coordinates
+ */
+export const calculateBounds = (coordinates: Coordinate[]): [Coordinate, Coordinate] => {
+  if (!coordinates.length) {
+    throw new Error('No coordinates provided');
+  }
+
+  const lats = coordinates.map(([lat]) => lat);
+  const lngs = coordinates.map(([, lng]) => lng);
+
+  return [
+    [Math.min(...lats), Math.min(...lngs)],
+    [Math.max(...lats), Math.max(...lngs)]
+  ];
 };

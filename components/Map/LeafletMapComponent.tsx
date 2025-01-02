@@ -3,10 +3,22 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import type { Coordinate, RouteData, RouteStep, RoutePreferences } from '../../types/map';
+import type { Coordinate, RouteData, RouteStep, RoutePreferences, SearchResult } from '../../types/map';
 import { formatDistance, formatDuration, cleanInstruction, getRouteParams } from '../../utils/routeUtils';
+import { getCurrentLocation, handleLocationError } from '../../utils/locationUtils';
 import { RoutePreferencesPanel } from './RoutePreferences';
+import Search from './Search';
 
+// Constants
+const DEFAULT_CENTER: Coordinate = [37.7749, -122.4194];
+const DEFAULT_ZOOM = 13;
+const DEFAULT_PREFERENCES: RoutePreferences = {
+  hills: 'none',
+  type: 'balanced',
+  surface: 'any'
+};
+
+// Initialize Leaflet icons
 const initializeLeafletIcons = () => {
   if ((L.Icon.Default.prototype as any)._getIconUrl) {
     delete (L.Icon.Default.prototype as any)._getIconUrl;
@@ -17,14 +29,6 @@ const initializeLeafletIcons = () => {
     iconUrl: '/leaflet/marker-icon.png',
     shadowUrl: '/leaflet/marker-shadow.png'
   });
-};
-
-const DEFAULT_CENTER: Coordinate = [37.7749, -122.4194];
-const DEFAULT_ZOOM = 13;
-const DEFAULT_PREFERENCES: RoutePreferences = {
-  hills: 'none',
-  type: 'balanced',
-  surface: 'any'
 };
 
 const LeafletMapComponent = () => {
@@ -45,35 +49,6 @@ const LeafletMapComponent = () => {
   const alternativeLayersRef = useRef<L.Polyline[]>([]);
   const markersRef = useRef<L.Marker[]>([]);
   const activeStepMarkerRef = useRef<L.Marker | null>(null);
-
-  // Initialize map
-  useEffect(() => {
-    initializeLeafletIcons();
-
-    if (!mapRef.current && mapContainer.current) {
-      const map = L.map(mapContainer.current).setView(DEFAULT_CENTER, DEFAULT_ZOOM);
-      
-      L.tileLayer(
-        `https://api.mapbox.com/styles/v1/mapbox/streets-v11/tiles/{z}/{x}/{y}?access_token=${process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN}`,
-        {
-          attribution: '© Mapbox © OpenStreetMap',
-          maxZoom: 18,
-          tileSize: 512,
-          zoomOffset: -1,
-        }
-      ).addTo(map);
-
-      map.on('click', handleMapClick);
-      mapRef.current = map;
-    }
-
-    return () => {
-      if (mapRef.current) {
-        mapRef.current.remove();
-        mapRef.current = null;
-      }
-    };
-  }, []);
 
   // Clear all map layers
   const clearMapLayers = useCallback(() => {
@@ -99,68 +74,6 @@ const LeafletMapComponent = () => {
       activeStepMarkerRef.current = null;
     }
   }, []);
-
-  // Handle map clicks
-  const handleMapClick = useCallback((e: L.LeafletMouseEvent) => {
-    if (!mapRef.current) return;
-
-    const { lat, lng } = e.latlng;
-    const newPoint: Coordinate = [lat, lng];
-    
-    const marker = L.marker([lat, lng]).addTo(mapRef.current);
-    markersRef.current.push(marker);
-
-    setWaypoints(prev => {
-      const newWaypoints = [...prev, newPoint];
-      if (newWaypoints.length >= 2) {
-        fetchRoute(newWaypoints);
-      }
-      return newWaypoints;
-    });
-  }, []);
-
-  // Fetch route data
-  const fetchRoute = async (points: Coordinate[]) => {
-    if (points.length < 2) return;
-    
-    setIsLoading(true);
-    setError(null);
-
-    try {
-      const coordinates = points
-        .map(([lat, lng]) => `${lng},${lat}`)
-        .join(';');
-
-      const params = getRouteParams(preferences);
-      const url = `https://api.mapbox.com/directions/v5/mapbox/cycling/${coordinates}`;
-
-      const response = await fetch(`${url}?${params.toString()}`);
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.message || 'Failed to fetch route');
-      }
-
-      if (!data.routes?.length) {
-        throw new Error('No route found');
-      }
-
-      const mainRoute = data.routes[0] as RouteData;
-      const alternativeRoutes = data.routes.slice(1) as RouteData[];
-
-      setRouteData(mainRoute);
-      setAlternatives(alternativeRoutes);
-      setSelectedRouteIndex(0);
-
-      drawRoutes(mainRoute, alternativeRoutes);
-
-    } catch (err) {
-      console.error('Error details:', err);
-      setError(err instanceof Error ? err.message : 'Error fetching route');
-    } finally {
-      setIsLoading(false);
-    }
-  };
 
   // Draw routes on the map
   const drawRoutes = useCallback((mainRoute: RouteData, alternatives: RouteData[]) => {
@@ -207,6 +120,76 @@ const LeafletMapComponent = () => {
     });
   }, [clearMapLayers]);
 
+  // Fetch route data
+  const fetchRoute = useCallback(async (points: Coordinate[]) => {
+    if (points.length < 2) return;
+    
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      const coordinates = points
+        .map(([lat, lng]) => `${lng},${lat}`)
+        .join(';');
+
+      const params = getRouteParams(preferences);
+      const url = `https://api.mapbox.com/directions/v5/mapbox/cycling/${coordinates}`;
+
+      const response = await fetch(`${url}?${params.toString()}`);
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.message || 'Failed to fetch route');
+      }
+
+      if (!data.routes?.length) {
+        throw new Error('No route found');
+      }
+
+      setRouteData(data.routes[0]);
+      setAlternatives(data.routes.slice(1));
+      setSelectedRouteIndex(0);
+
+      drawRoutes(data.routes[0], data.routes.slice(1));
+
+    } catch (err) {
+      console.error('Error fetching route:', err);
+      setError(err instanceof Error ? err.message : 'Error fetching route');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [preferences, drawRoutes]);
+
+  // Handle map clicks
+  const handleMapClick = useCallback((e: L.LeafletMouseEvent) => {
+    if (!mapRef.current) return;
+
+    const { lat, lng } = e.latlng;
+    const newPoint: Coordinate = [lat, lng];
+    
+    const marker = L.marker([lat, lng]).addTo(mapRef.current);
+    markersRef.current.push(marker);
+
+    setWaypoints(prev => {
+      const newWaypoints = [...prev, newPoint];
+      if (newWaypoints.length >= 2) {
+        fetchRoute(newWaypoints);
+      }
+      return newWaypoints;
+    });
+  }, [fetchRoute]);
+
+  // Handle search result selection
+  const handleLocationSelect = useCallback((result: SearchResult) => {
+    if (!mapRef.current) return;
+
+    const [lng, lat] = result.center;
+    mapRef.current.flyTo([lat, lng], 15, {
+      duration: 1.5,
+      easeLinearity: 0.25
+    });
+  }, []);
+
   // Handle route selection
   const selectRoute = useCallback((index: number) => {
     if (!mapRef.current) return;
@@ -239,21 +222,73 @@ const LeafletMapComponent = () => {
     setError(null);
 
     if (mapRef.current) {
-      mapRef.current.setView(DEFAULT_CENTER, DEFAULT_ZOOM);
+      mapRef.current.flyTo(DEFAULT_CENTER, DEFAULT_ZOOM, {
+        duration: 1.5,
+        easeLinearity: 0.25
+      });
     }
   }, [clearMapLayers]);
+
+  // Initialize map
+  useEffect(() => {
+    if (!mapContainer.current) return;
+
+    initializeLeafletIcons();
+    
+    const map = L.map(mapContainer.current, {
+      center: DEFAULT_CENTER,
+      zoom: DEFAULT_ZOOM
+    });
+    
+    L.tileLayer(
+      `https://api.mapbox.com/styles/v1/mapbox/streets-v11/tiles/{z}/{x}/{y}?access_token=${process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN}`,
+      {
+        attribution: '© Mapbox © OpenStreetMap',
+        maxZoom: 18,
+        tileSize: 512,
+        zoomOffset: -1,
+      }
+    ).addTo(map);
+
+    map.on('click', handleMapClick);
+    mapRef.current = map;
+
+    // Get user location after map is initialized
+    getCurrentLocation()
+      .then((position) => {
+        if (mapRef.current) {
+          mapRef.current.flyTo(position, DEFAULT_ZOOM, {
+            duration: 1.5,
+            easeLinearity: 0.25
+          });
+        }
+      })
+      .catch((error) => {
+        console.warn('Location error:', handleLocationError(error));
+      });
+
+    return () => {
+      map.remove();
+      mapRef.current = null;
+    };
+  }, [handleMapClick]);
 
   // Update route when preferences change
   useEffect(() => {
     if (waypoints.length >= 2) {
       fetchRoute(waypoints);
     }
-  }, [preferences, waypoints]);
+  }, [preferences, waypoints, fetchRoute]);
 
   return (
     <div className="flex h-screen bg-gray-100">
       <div className="flex-1 p-4">
         <div className="bg-white rounded-lg shadow-lg overflow-hidden h-full relative">
+          {/* Search component */}
+          <div className="absolute top-4 left-4 z-10 w-72">
+            <Search onLocationSelect={handleLocationSelect} />
+          </div>
+
           <div ref={mapContainer} className="h-full w-full" />
           
           {isLoading && (
